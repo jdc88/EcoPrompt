@@ -1,6 +1,6 @@
 /**
- * Frontend-only prompt compression: remove common filler, normalize whitespace,
- * add a compact task directive so dropdown choices affect output shape.
+ * Rule-based prompt compression: strip fillers, normalize whitespace,
+ * compact task directive. Token estimate ≈ words × 1.3.
  */
 
 const FILLER_PATTERNS = [
