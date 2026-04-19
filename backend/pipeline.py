@@ -293,7 +293,9 @@ def revise_prompt(
     _ = mode if mode in MODES else DEFAULT_MODE
     system = REVISER_BASE
     examples_block = ""
-    ok, _note = _should_use_retrieval(user_prompt, skeleton, retrievals)
+    ok, gate_note = _should_use_retrieval(user_prompt, skeleton, retrievals)
+    retrieval_in_prompt = False
+    retrieval_gate_reason = gate_note
     if ok:
         roles: list[str] = []
         for item in retrievals:
@@ -312,6 +314,9 @@ def revise_prompt(
                 + "\n".join(f"- {r}" for r in roles)
                 + "\n\n"
             )
+            retrieval_in_prompt = True
+        else:
+            retrieval_gate_reason = "no usable role labels in hits"
 
     user_msg = (
         f"SKELETON (hint only — trust ORIGINAL if they conflict):\n{skeleton}\n\n"
@@ -335,6 +340,10 @@ def revise_prompt(
     usage["rewrite_model"] = REVISER_MODEL
     usage["rewrite_prompt_input"] = user_msg
     usage["rewrite_prompt_system"] = system
+    usage["retrieval_allowed"] = ok
+    usage["retrieval_in_prompt"] = retrieval_in_prompt
+    usage["retrieval_gate_reason"] = retrieval_gate_reason
+    usage["retrieval_hit_count"] = len(retrievals)
     return _clean_output(raw_out), usage
 
 
@@ -354,7 +363,15 @@ def revise_prompt_safe(
         logger.warning("revise_prompt Ollama failed, rules fallback: %s", e)
         text, _rev = optimize_prompt(user_prompt, mode)
         fallback_latency_ms = 0.0
-        return _clean_output(text), True, {"wall_latency_ms": fallback_latency_ms, "rewrite_model": REVISER_MODEL}
+        ok, gate_note = _should_use_retrieval(user_prompt, skeleton, retrievals)
+        return _clean_output(text), True, {
+            "wall_latency_ms": fallback_latency_ms,
+            "rewrite_model": REVISER_MODEL,
+            "retrieval_allowed": ok,
+            "retrieval_in_prompt": False,
+            "retrieval_gate_reason": f"ollama_failed; {gate_note}" if ok else gate_note,
+            "retrieval_hit_count": len(retrievals),
+        }
 
 
 def run_optimize_pipeline(user_prompt: str, mode: str, run_id: int | None = None) -> dict[str, Any]:
@@ -378,6 +395,17 @@ def run_optimize_pipeline(user_prompt: str, mode: str, run_id: int | None = None
     examples_list = [r["retrieved_text"] for r in retrievals]
 
     optimized, rules_fallback, rewrite_usage = revise_prompt_safe(raw, m, skeleton_raw, retrievals)
+
+    retrieval_allowed = bool(rewrite_usage.get("retrieval_allowed"))
+    retrieval_in_prompt = bool(rewrite_usage.get("retrieval_in_prompt"))
+    retrieval_gate_reason = str(rewrite_usage.get("retrieval_gate_reason") or "")
+    retrieval_hit_count = int(rewrite_usage.get("retrieval_hit_count") or len(retrievals))
+    if retrieval_in_prompt:
+        retrieval_marker = "used"
+    elif retrieval_allowed:
+        retrieval_marker = "allowed_no_hints"
+    else:
+        retrieval_marker = "skipped"
 
     before_t = estimate_tokens_by_model(raw, "GPT-4")
     after_t = estimate_tokens_by_model(optimized, "GPT-4")
@@ -431,6 +459,11 @@ def run_optimize_pipeline(user_prompt: str, mode: str, run_id: int | None = None
         "skeleton_raw": skeleton_raw,
         "rules_fallback": rules_fallback,
         "retrievals": retrievals,
+        "retrieval_marker": retrieval_marker,
+        "retrieval_allowed": retrieval_allowed,
+        "retrieval_in_prompt": retrieval_in_prompt,
+        "retrieval_gate_reason": retrieval_gate_reason,
+        "retrieval_hit_count": retrieval_hit_count,
         "rewrite_metrics": {
             "input_tokens": float(input_tokens or 0.0),
             "output_tokens": float(output_tokens or 0.0),

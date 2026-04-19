@@ -125,6 +125,11 @@ class PromptRetrievalPersistenceTests(unittest.TestCase):
                 },
             },
             "rewrite_metrics": {"model_name": "qwen2.5:1.5b"},
+            "retrieval_marker": "used",
+            "retrieval_allowed": True,
+            "retrieval_in_prompt": True,
+            "retrieval_gate_reason": "ok",
+            "retrieval_hit_count": 3,
         }
 
         with patch("main.run_optimize_pipeline", return_value=fake_result) as mock_run_pipeline, patch(
@@ -138,6 +143,8 @@ class PromptRetrievalPersistenceTests(unittest.TestCase):
         self.assertEqual(payload["run_id"], 777)
         self.assertEqual(payload["eco_score"], 88.0)
         self.assertIn("eco_breakdown", payload)
+        self.assertEqual(payload["retrieval_marker"], "used")
+        self.assertTrue(payload["retrieval_in_prompt"])
 
     def test_run_pipeline_persists_zero_retrievals_safely(self):
         fallback_skeleton = (
@@ -149,7 +156,21 @@ class PromptRetrievalPersistenceTests(unittest.TestCase):
         )
         with patch("pipeline.extract_skeleton_safe", return_value=(fallback_skeleton, {})), patch(
             "pipeline.hd_search", return_value=[]
-        ), patch("pipeline.revise_prompt_safe", return_value=("optimized", False, {"wall_latency_ms": 250.0, "rewrite_model": "qwen2.5:1.5b"})), patch(
+        ), patch(
+            "pipeline.revise_prompt_safe",
+            return_value=(
+                "optimized",
+                False,
+                {
+                    "wall_latency_ms": 250.0,
+                    "rewrite_model": "qwen2.5:1.5b",
+                    "retrieval_allowed": False,
+                    "retrieval_in_prompt": False,
+                    "retrieval_gate_reason": "no hits returned",
+                    "retrieval_hit_count": 0,
+                },
+            ),
+        ), patch(
             "pipeline.estimate_tokens_by_model", return_value=80.0
         ), patch("pipeline.clarity_score", return_value=90.0), patch(
             "pipeline.detect_meaning_loss", return_value=False
@@ -165,6 +186,8 @@ class PromptRetrievalPersistenceTests(unittest.TestCase):
         )
         self.assertIn("eco", _)
         self.assertEqual(_["eco"]["eco_breakdown"]["retrieval_count"], 0)
+        self.assertEqual(_["retrieval_marker"], "skipped")
+        self.assertEqual(_["retrieval_gate_reason"], "no hits returned")
 
     def test_build_eco_score_prefers_lower_compute_proxy(self):
         light = build_eco_score_payload(

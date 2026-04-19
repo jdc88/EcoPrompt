@@ -36,6 +36,34 @@ function efficiencyLabelFromScore(score) {
   return "LOW";
 }
 
+/** @typedef {{ source: "backend" | "local"; marker?: string; inPrompt?: boolean; allowed?: boolean; reason?: string; hitCount?: number }} RetrievalUiState */
+
+function retrievalChipClasses(retrieval) {
+  if (!retrieval || retrieval.source === "local") {
+    return "border-white/15 bg-white/5 text-slate-400";
+  }
+  if (retrieval.inPrompt) {
+    return "border-cyan-400/45 bg-cyan-500/15 text-cyan-100";
+  }
+  if (retrieval.allowed) {
+    return "border-amber-400/35 bg-amber-500/10 text-amber-100";
+  }
+  return "border-white/15 bg-white/5 text-slate-400";
+}
+
+function retrievalHeadline(retrieval) {
+  if (!retrieval || retrieval.source === "local") {
+    return "Local rules only";
+  }
+  if (retrieval.inPrompt) {
+    return "Retrieval context used";
+  }
+  if (retrieval.allowed) {
+    return "Retrieval allowed, no hints added";
+  }
+  return "Retrieval not used";
+}
+
 /**
  * @param {{ onSignalMetrics?: (m: null | { beforeTokens: number; afterTokens: number; efficiency: number; clarityScore: number; mode: string }) => void }} props
  */
@@ -52,6 +80,8 @@ export default function EcoPromptUI({ onSignalMetrics }) {
   const [runMetrics, setRunMetrics] = useState(null);
   /** @type {null | { intent: string; task: string; subject: string; output: string; prompt: string }} */
   const [skeleton, setSkeleton] = useState(null);
+  /** @type {null | RetrievalUiState} */
+  const [retrieval, setRetrieval] = useState(null);
   const [copied, setCopied] = useState(false);
 
   const tokenStats = useMemo(() => {
@@ -150,6 +180,7 @@ export default function EcoPromptUI({ onSignalMetrics }) {
       setLastOptimized(null);
       setRunMetrics(null);
       setSkeleton(null);
+      setRetrieval(null);
       setLastReverted(false);
       setCopied(false);
       return;
@@ -181,6 +212,23 @@ export default function EcoPromptUI({ onSignalMetrics }) {
           afterTokens: Number(data.afterTokens) || 0,
           mode: typeof data.mode === "string" ? data.mode : optimizationMode,
         });
+        setRetrieval({
+          source: "backend",
+          marker:
+            typeof data.retrieval_marker === "string"
+              ? data.retrieval_marker
+              : undefined,
+          inPrompt: Boolean(data.retrieval_in_prompt),
+          allowed: Boolean(data.retrieval_allowed),
+          reason:
+            typeof data.retrieval_gate_reason === "string"
+              ? data.retrieval_gate_reason
+              : "",
+          hitCount:
+            typeof data.retrieval_hit_count === "number"
+              ? data.retrieval_hit_count
+              : Number(data.retrieval_hit_count) || 0,
+        });
         if (data.skeleton && typeof data.skeleton === "object") {
           setSkeleton({
             intent: String(data.skeleton.intent ?? ""),
@@ -210,6 +258,7 @@ export default function EcoPromptUI({ onSignalMetrics }) {
     setOptimized(out);
     setLastReverted(reverted);
     setSkeleton(null);
+    setRetrieval({ source: "local" });
     setRunMetrics({
       efficiency: tokenReductionPct(before, after),
       clarityScore: computeClarityScore(raw, out, optimizationMode, reverted, {
@@ -352,6 +401,46 @@ export default function EcoPromptUI({ onSignalMetrics }) {
             <p className="mt-1 text-[10px] uppercase tracking-wider text-cyan-300/80">
               Mode: <span className="font-semibold text-cyan-200">{modeUsed}</span>
             </p>
+            {retrieval && (
+              <div className="mt-2 flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${retrievalChipClasses(retrieval)}`}
+                  >
+                    {retrieval.inPrompt ? (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-cyan-300"
+                        aria-hidden
+                      />
+                    ) : null}
+                    {retrievalHeadline(retrieval)}
+                  </span>
+                  {retrieval.source === "backend" &&
+                    typeof retrieval.hitCount === "number" && (
+                      <span className="text-[10px] text-slate-500">
+                        {retrieval.hitCount} retrieval
+                        {retrieval.hitCount === 1 ? "" : "s"} stored for this run
+                      </span>
+                    )}
+                </div>
+                {retrieval.source === "backend" && retrieval.reason ? (
+                  <p className="max-w-md text-[10px] leading-snug text-slate-500">
+                    {retrieval.inPrompt
+                      ? "Structural role hints from Human Delta were included in the reviser prompt."
+                      : retrieval.allowed
+                        ? "Human Delta returned hits, but no usable role labels were extracted for the reviser."
+                        : "Human Delta was not used for reviser context on this run."}{" "}
+                    <span className="text-slate-500">·</span>{" "}
+                    <span className="font-mono text-slate-500">{retrieval.reason}</span>
+                  </p>
+                ) : retrieval.source === "local" ? (
+                  <p className="max-w-md text-[10px] leading-snug text-slate-500">
+                    Backend unavailable — in-browser rules only (no Human Delta
+                    retrieval).
+                  </p>
+                ) : null}
+              </div>
+            )}
           </div>
           <button
             type="button"

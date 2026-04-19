@@ -57,6 +57,11 @@ class OptimizeResponse(BaseModel):
     skeleton: SkeletonModel
     eco_score: float
     eco_breakdown: dict
+    retrieval_marker: str = "skipped"
+    retrieval_allowed: bool = False
+    retrieval_in_prompt: bool = False
+    retrieval_gate_reason: str = ""
+    retrieval_hit_count: int = 0
 
 
 @app.get("/health")
@@ -132,6 +137,7 @@ def optimize_endpoint(req: PromptRequest):
             ]
             if result.get("rules_fallback"):
                 tags.append("fallback:rules")
+            tags.append(f"retrieval:{result.get('retrieval_marker', 'skipped')}")
             eco_payload = result.get("eco", {})
             changes_payload = {
                 "tags": tags,
@@ -162,6 +168,11 @@ def optimize_endpoint(req: PromptRequest):
         skeleton=skeleton_model,
         eco_score=float(result.get("eco", {}).get("eco_score") or 0.0),
         eco_breakdown=result.get("eco", {}).get("eco_breakdown", {}),
+        retrieval_marker=str(result.get("retrieval_marker") or "skipped"),
+        retrieval_allowed=bool(result.get("retrieval_allowed")),
+        retrieval_in_prompt=bool(result.get("retrieval_in_prompt")),
+        retrieval_gate_reason=str(result.get("retrieval_gate_reason") or ""),
+        retrieval_hit_count=int(result.get("retrieval_hit_count") or 0),
     )
 
 
