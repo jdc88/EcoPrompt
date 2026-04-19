@@ -1,87 +1,22 @@
 /**
- * Rule-based prompt compression: strip fillers, normalize whitespace,
- * compact task directive. Token estimate ≈ words × 1.3.
+ * Token estimation + legacy single-call optimize (defaults to precise mode).
  */
 
-const FILLER_PATTERNS = [
-  /\bcan you please\b/gi,
-  /\bcould you please\b/gi,
-  /\bi want you to\b/gi,
-  /\bi need you to\b/gi,
-  /\bin detail\b/gi,
-  /\bplease note that\b/gi,
-  /\bit would be great if you could\b/gi,
-  /\bi would like you to\b/gi,
-  /\bas much detail as possible\b/gi,
-  /\bplease\b/gi,
-];
+import { DEFAULT_OPTIMIZATION_MODE, optimizePromptByMode } from "./modes";
+import { estimateTokensByModel } from "./tokenEstimate";
 
-const TASK_DIRECTIVE = {
-  Explain: "Explain",
-  Summarize: "Summarize",
-  Analyze: "Analyze",
-  Generate: "Generate",
-};
+export { optimizePromptByMode, OPTIMIZATION_MODES, DEFAULT_OPTIMIZATION_MODE } from "./modes";
 
-function wordCount(text) {
-  return text.trim() ? text.trim().split(/\s+/).length : 0;
-}
-
+/** @deprecated Prefer estimateTokensByModel; kept for API parity (GPT-4 heuristic). */
 export function estimateTokens(text) {
-  return Math.round(wordCount(text) * 1.3 * 10) / 10;
-}
-
-function normalizeWhitespace(str) {
-  return str.replace(/\s+/g, " ").trim();
-}
-
-function stripFillers(text) {
-  let out = text;
-  for (const re of FILLER_PATTERNS) {
-    out = out.replace(re, " ");
-  }
-  return normalizeWhitespace(out);
-}
-
-function compactLeadingDirective(taskType, body) {
-  const verb = TASK_DIRECTIVE[taskType] || "Complete";
-  const lower = body.toLowerCase();
-  const prefixes = ["explain ", "summarize ", "analyze ", "generate "];
-  let rest = body;
-  for (const p of prefixes) {
-    if (lower.startsWith(p)) {
-      rest = body.slice(p.length).trim();
-      break;
-    }
-  }
-  return `${verb}: ${rest}`.trim();
+  return estimateTokensByModel(text, "GPT-4");
 }
 
 /**
- * @param {string} raw
- * @param {{ taskType: string }} options
+ * @deprecated Prefer optimizePromptByMode from ./modes.js
+ * @param {{ taskType?: string }} options — ignored; kept for call-site compatibility
  */
-export function optimizePrompt(raw, { taskType }) {
-  const stripped = stripFillers(raw);
-  if (!stripped) {
-    return "";
-  }
-
-  let core = stripped;
-
-  const sentences = core.split(/(?<=[.!?])\s+/).filter(Boolean);
-  const seen = new Set();
-  const deduped = [];
-  for (const s of sentences) {
-    const key = s.toLowerCase().replace(/\s+/g, " ");
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(s);
-    }
-  }
-  core = deduped.join(" ");
-
-  core = compactLeadingDirective(taskType, core);
-
-  return core;
+export function optimizePrompt(raw, { taskType } = {}) {
+  void taskType;
+  return optimizePromptByMode(raw, DEFAULT_OPTIMIZATION_MODE).text;
 }

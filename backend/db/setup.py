@@ -3,7 +3,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db import connect_to_database
+from db.db import connect_to_database
 
 def run_schema():
     conn = connect_to_database()

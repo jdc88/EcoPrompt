@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
-import { optimizePrompt, estimateTokens } from "@/lib/optimizer";
-import { computeHumanDelta } from "@/lib/humanDelta";
+import { estimateTokensByModel, TOKEN_MODELS } from "@/lib/tokenEstimate";
+import {
+  DEFAULT_OPTIMIZATION_MODE,
+  losesConstraints,
+  optimizePromptByMode,
+} from "@/lib/modes";
+import {
+  computeClarityScore,
+  detectMeaningLoss,
+  tokenReductionPct,
+} from "@/lib/scoring";
 
 export async function POST(request) {
   let body;
@@ -11,8 +20,12 @@ export async function POST(request) {
   }
 
   const prompt = typeof body.prompt === "string" ? body.prompt : "";
-  const taskType =
-    typeof body.taskType === "string" ? body.taskType : "Explain";
+  const mode =
+    typeof body.mode === "string" ? body.mode : DEFAULT_OPTIMIZATION_MODE;
+  const model =
+    typeof body.model === "string" && TOKEN_MODELS.includes(body.model)
+      ? body.model
+      : "GPT-4";
 
   const trimmed = prompt.trim();
   if (!trimmed) {
@@ -20,24 +33,37 @@ export async function POST(request) {
       optimized: "",
       beforeTokens: 0,
       afterTokens: 0,
-      efficiencyScore: 0,
-      impactLevel: "HIGH IMPACT",
+      efficiency: 0,
+      clarityScore: 0,
+      mode: DEFAULT_OPTIMIZATION_MODE,
     });
   }
 
-  const optimized = optimizePrompt(trimmed, { taskType });
-  const beforeTokens = estimateTokens(trimmed);
-  const afterTokens = estimateTokens(optimized);
-  const { efficiencyScore, impactLevel } = computeHumanDelta(
-    beforeTokens,
-    afterTokens,
+  const { text: optimized, reverted } = optimizePromptByMode(trimmed, mode);
+  const beforeTokens = estimateTokensByModel(trimmed, model);
+  const afterTokens = estimateTokensByModel(optimized, model);
+  const efficiency = tokenReductionPct(beforeTokens, afterTokens);
+  const meaningLoss =
+    !reverted && detectMeaningLoss(trimmed, optimized, mode);
+  const constraintDrop =
+    !reverted && losesConstraints(trimmed, optimized);
+  const clarityScore = computeClarityScore(
+    trimmed,
+    optimized,
+    mode,
+    reverted,
+    { meaningLoss, constraintDrop },
   );
 
   return NextResponse.json({
     optimized,
+    model,
     beforeTokens,
     afterTokens,
-    efficiencyScore,
-    impactLevel,
+    efficiency,
+    clarityScore,
+    mode: ["clean", "precise", "compact", "structured"].includes(mode)
+      ? mode
+      : DEFAULT_OPTIMIZATION_MODE,
   });
 }

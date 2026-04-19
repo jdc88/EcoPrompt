@@ -1,10 +1,34 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { estimateTokens, optimizePrompt } from "@/lib/optimizer";
+import { useEffect, useMemo, useState } from "react";
 import { computeHumanDelta } from "@/lib/humanDelta";
+import { estimateTokensByModel, TOKEN_MODELS } from "@/lib/tokenEstimate";
+import { calculateImpact, calculateSavings } from "@/lib/impact";
+import { getBackendUrl, isBackendConfigured } from "@/lib/backend";
+import {
+  DEFAULT_OPTIMIZATION_MODE,
+  OPTIMIZATION_MODES,
+  optimizePromptByMode,
+  losesConstraints,
+} from "@/lib/modes";
+import {
+  computeClarityScore,
+  detectMeaningLoss,
+  tokenReductionPct,
+} from "@/lib/scoring";
 
-const TASK_TYPES = ["Explain", "Summarize", "Analyze", "Generate"];
+const MODEL_HINTS = {
+  "GPT-4": "words × 1.3",
+  Claude: "words × 1.2",
+  LLaMA: "words × 1.4",
+};
+
+const MODE_LABELS = {
+  clean: "Clean — strip fillers only",
+  precise: "Precise — clarity & ambiguity (default)",
+  compact: "Compact — light redundancy trim",
+  structured: "Structured — bullets / steps",
+};
 
 function efficiencyLabelFromScore(score) {
   if (score >= 60) return "HIGH";
@@ -13,49 +37,175 @@ function efficiencyLabelFromScore(score) {
 }
 
 /**
- * @param {{ onHumanDeltaChange?: (delta: null | { efficiencyScore: number; impactLevel: string; beforeTokens: number; afterTokens: number }) => void }} props
+ * @param {{ onSignalMetrics?: (m: null | { beforeTokens: number; afterTokens: number; efficiency: number; clarityScore: number; mode: string }) => void }} props
  */
-export default function EcoPromptUI({ onHumanDeltaChange }) {
+export default function EcoPromptUI({ onSignalMetrics }) {
   const [prompt, setPrompt] = useState("");
-  const [taskType, setTaskType] = useState("Explain");
+  const [optimizationMode, setOptimizationMode] = useState(
+    DEFAULT_OPTIMIZATION_MODE,
+  );
+  const [targetModel, setTargetModel] = useState("GPT-4");
   const [optimized, setOptimized] = useState("");
-  const [tokensBefore, setTokensBefore] = useState(null);
-  const [tokensAfter, setTokensAfter] = useState(null);
-  const [efficiencyScore, setEfficiencyScore] = useState(null);
-  const [impactLevel, setImpactLevel] = useState(null);
+  const [lastRaw, setLastRaw] = useState(null);
+  const [lastOptimized, setLastOptimized] = useState(null);
+  const [lastReverted, setLastReverted] = useState(false);
+  const [runMetrics, setRunMetrics] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  const reductionPct = efficiencyScore;
+  const tokenStats = useMemo(() => {
+    if (!lastRaw || lastOptimized == null || lastOptimized === "") return null;
+
+    const byModel = {};
+    for (const m of TOKEN_MODELS) {
+      const before = estimateTokensByModel(lastRaw, m);
+      const after = estimateTokensByModel(lastOptimized, m);
+      byModel[m] = {
+        before,
+        after,
+        delta: computeHumanDelta(before, after),
+      };
+    }
+
+    const row = byModel[targetModel];
+    return { byModel, delta: row.delta };
+  }, [lastRaw, lastOptimized, targetModel]);
+
+  useEffect(() => {
+    if (!tokenStats || !lastRaw || lastOptimized == null || lastOptimized === "") {
+      onSignalMetrics?.(null);
+      return;
+    }
+
+    const eff =
+      runMetrics?.efficiency ?? tokenStats.delta.efficiencyScore;
+    const clar =
+      runMetrics?.clarityScore ??
+      computeClarityScore(
+        lastRaw,
+        lastOptimized,
+        optimizationMode,
+        lastReverted,
+        {
+          meaningLoss:
+            !lastReverted &&
+            detectMeaningLoss(lastRaw, lastOptimized, optimizationMode),
+          constraintDrop:
+            !lastReverted && losesConstraints(lastRaw, lastOptimized),
+        },
+      );
+
+    onSignalMetrics?.({
+      beforeTokens: tokenStats.delta.beforeTokens,
+      afterTokens: tokenStats.delta.afterTokens,
+      efficiency: eff,
+      clarityScore: clar,
+      mode: runMetrics?.mode ?? optimizationMode,
+    });
+  }, [
+    tokenStats,
+    runMetrics,
+    lastRaw,
+    lastOptimized,
+    lastReverted,
+    optimizationMode,
+    onSignalMetrics,
+  ]);
+
+  const tokensBefore = tokenStats?.delta.beforeTokens ?? null;
+  const tokensAfter = tokenStats?.delta.afterTokens ?? null;
+  const reductionPct =
+    runMetrics?.efficiency ?? tokenStats?.delta.efficiencyScore ?? null;
+  const clarityScore =
+    runMetrics?.clarityScore ??
+    (tokenStats && lastRaw && lastOptimized != null
+      ? computeClarityScore(
+          lastRaw,
+          lastOptimized,
+          optimizationMode,
+          lastReverted,
+          {
+            meaningLoss:
+              !lastReverted &&
+              detectMeaningLoss(lastRaw, lastOptimized, optimizationMode),
+            constraintDrop:
+              !lastReverted && losesConstraints(lastRaw, lastOptimized),
+          },
+        )
+      : null);
 
   const efficiencyLabel =
-    efficiencyScore != null ? efficiencyLabelFromScore(efficiencyScore) : null;
+    reductionPct != null ? efficiencyLabelFromScore(reductionPct) : null;
+  const modeUsed = runMetrics?.mode ?? optimizationMode;
 
   const panelClass =
     "rounded-2xl border border-white/10 bg-white/10 p-6 shadow-glow backdrop-blur-xl transition hover:border-cyan-400/25 hover:bg-white/[0.12]";
 
-  function handleOptimize() {
+  async function handleOptimize() {
     const raw = prompt.trim();
     if (!raw) {
       setOptimized("");
-      setTokensBefore(null);
-      setTokensAfter(null);
-      setEfficiencyScore(null);
-      setImpactLevel(null);
-      onHumanDeltaChange?.(null);
+      setLastRaw(null);
+      setLastOptimized(null);
+      setRunMetrics(null);
+      setLastReverted(false);
+      setCopied(false);
       return;
     }
 
-    const before = estimateTokens(raw);
-    const out = optimizePrompt(raw, { taskType });
-    const after = estimateTokens(out);
-    const delta = computeHumanDelta(before, after);
+    const base = getBackendUrl();
+    if (base) {
+      try {
+        const res = await fetch(`${base}/optimize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: raw,
+            mode: optimizationMode,
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const out =
+          typeof data.optimized === "string" ? data.optimized : "";
+        setLastRaw(raw);
+        setLastOptimized(out);
+        setOptimized(out);
+        setLastReverted(false);
+        setRunMetrics({
+          efficiency: Number(data.efficiency) || 0,
+          clarityScore: Number(data.clarityScore) || 0,
+          beforeTokens: Number(data.beforeTokens) || 0,
+          afterTokens: Number(data.afterTokens) || 0,
+          mode: typeof data.mode === "string" ? data.mode : optimizationMode,
+        });
+        setCopied(false);
+        return;
+      } catch {
+        /* local fallback */
+      }
+    }
 
-    setTokensBefore(before);
-    setTokensAfter(after);
+    const { text: out, reverted } = optimizePromptByMode(
+      raw,
+      optimizationMode,
+    );
+    const before = estimateTokensByModel(raw, targetModel);
+    const after = estimateTokensByModel(out, targetModel);
+    setLastRaw(raw);
+    setLastOptimized(out);
     setOptimized(out);
-    setEfficiencyScore(delta.efficiencyScore);
-    setImpactLevel(delta.impactLevel);
-    onHumanDeltaChange?.(delta);
+    setLastReverted(reverted);
+    setRunMetrics({
+      efficiency: tokenReductionPct(before, after),
+      clarityScore: computeClarityScore(raw, out, optimizationMode, reverted, {
+        meaningLoss:
+          !reverted && detectMeaningLoss(raw, out, optimizationMode),
+        constraintDrop: !reverted && losesConstraints(raw, out),
+      }),
+      beforeTokens: before,
+      afterTokens: after,
+      mode: optimizationMode,
+    });
     setCopied(false);
   }
 
@@ -75,6 +225,20 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
     return Math.max(0, Math.round((tokensBefore - tokensAfter) * 10) / 10);
   }, [tokensBefore, tokensAfter]);
 
+  const resourceFootprint = useMemo(() => {
+    if (tokensBefore == null || tokensAfter == null) return null;
+    const before = calculateImpact(tokensBefore);
+    const after = calculateImpact(tokensAfter);
+    const savings = calculateSavings(tokensBefore, tokensAfter);
+    return { before, after, savings };
+  }, [tokensBefore, tokensAfter]);
+
+  const fmtRes = (n) => {
+    if (n < 1e-4) return n.toExponential(1);
+    if (n < 0.01) return n.toFixed(5);
+    return n.toFixed(4);
+  };
+
   return (
     <div className="grid flex-1 gap-6 lg:grid-cols-2 lg:gap-8">
       <section className={`${panelClass} flex flex-col gap-6`}>
@@ -83,9 +247,19 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
             🌿 EcoPrompt
           </h1>
           <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-300">
-            Same intent, fewer tokens—measure the Human Delta and watch the
-            ocean metaphor respond to lighter AI compute.
+            Multi-mode, constraint-aware optimization—same meaning, clearer
+            signal, measured Human Delta (efficiency + clarity).
           </p>
+          {isBackendConfigured() ? (
+            <p className="mt-2 text-[10px] font-medium uppercase tracking-wider text-emerald-400/90">
+              Backend API connected
+            </p>
+          ) : (
+            <p className="mt-2 text-[10px] text-slate-500">
+              Set NEXT_PUBLIC_BACKEND_URL for Python optimize (otherwise local
+              rules in-browser).
+            </p>
+          )}
         </div>
 
         <label className="flex flex-col gap-2">
@@ -101,22 +275,46 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
           />
         </label>
 
-        <label className="flex flex-col gap-2">
-          <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
-            Task type
-          </span>
-          <select
-            value={taskType}
-            onChange={(e) => setTaskType(e.target.value)}
-            className="rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm text-slate-100 outline-none ring-cyan-400/30 transition focus:border-cyan-400/40 focus:ring-2"
-          >
-            {TASK_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="flex flex-col gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
+              Optimization mode
+            </span>
+            <select
+              value={optimizationMode}
+              onChange={(e) => setOptimizationMode(e.target.value)}
+              className="rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm text-slate-100 outline-none ring-cyan-400/30 transition focus:border-cyan-400/40 focus:ring-2"
+            >
+              {OPTIMIZATION_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] leading-snug text-slate-500">
+              {MODE_LABELS[optimizationMode] ?? ""}
+            </span>
+          </label>
+          <label className="flex flex-col gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
+              Token model (comparison)
+            </span>
+            <select
+              value={targetModel}
+              onChange={(e) => setTargetModel(e.target.value)}
+              className="rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm text-slate-100 outline-none ring-cyan-400/30 transition focus:border-cyan-400/40 focus:ring-2"
+            >
+              {TOKEN_MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] text-slate-500">
+              Heuristic: {MODEL_HINTS[targetModel]}
+            </span>
+          </label>
+        </div>
 
         <button
           type="button"
@@ -133,7 +331,12 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
 
       <section className={`${panelClass} flex flex-col gap-6`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <h2 className="text-lg font-semibold text-white">Optimized Output</h2>
+          <div>
+            <h2 className="text-lg font-semibold text-white">Optimized Output</h2>
+            <p className="mt-1 text-[10px] uppercase tracking-wider text-cyan-300/80">
+              Mode: <span className="font-semibold text-cyan-200">{modeUsed}</span>
+            </p>
+          </div>
           <button
             type="button"
             disabled={!optimized}
@@ -148,16 +351,24 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
           <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
             {optimized || (
               <span className="text-slate-500">
-                Run optimize to see a tighter prompt here.
+                Run optimize to see output here.
               </span>
             )}
           </p>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-center text-[10px] text-slate-400">
+          Score cards use tokenizer{" "}
+          <span className="font-semibold text-cyan-200">{targetModel}</span> ·
+          Human Delta blends{" "}
+          <span className="text-cyan-200/90">efficiency</span> +{" "}
+          <span className="text-cyan-200/90">clarity</span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              Tokens
+              Tokens ({targetModel})
             </p>
             <p className="mt-1 text-lg font-semibold tabular-nums text-white">
               {tokensBefore != null && tokensAfter != null ? (
@@ -173,15 +384,25 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              Reduction
+              Efficiency
             </p>
             <p className="mt-1 text-lg font-semibold tabular-nums text-cyan-300">
               {reductionPct != null ? `${reductionPct}%` : "—"}
             </p>
+            <p className="mt-0.5 text-[9px] text-slate-500">Token reduction</p>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              Efficiency
+              Clarity score
+            </p>
+            <p className="mt-1 text-lg font-semibold tabular-nums text-emerald-300">
+              {clarityScore != null ? clarityScore : "—"}
+            </p>
+            <p className="mt-0.5 text-[9px] text-slate-500">0–100 heuristic</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              Band
             </p>
             <p className="mt-1 text-lg font-semibold text-white">
               {efficiencyLabel ?? "—"}
@@ -189,38 +410,123 @@ export default function EcoPromptUI({ onHumanDeltaChange }) {
           </div>
         </div>
 
+        {resourceFootprint && (
+          <div className="rounded-xl border border-emerald-400/15 bg-black/25 px-4 py-3">
+            <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              Footprint (approx.)
+            </h3>
+            <ul className="mt-2 space-y-2 text-sm text-slate-200">
+              <li className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-base" aria-hidden>
+                  ⚡
+                </span>
+                <span className="text-slate-400">Energy (kWh)</span>
+                <span className="font-medium tabular-nums text-cyan-100">
+                  {fmtRes(resourceFootprint.before.energy)}
+                  <span className="mx-1 text-slate-500">→</span>
+                  {fmtRes(resourceFootprint.after.energy)}
+                </span>
+              </li>
+              <li className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-base" aria-hidden>
+                  💧
+                </span>
+                <span className="text-slate-400">Water (L)</span>
+                <span className="font-medium tabular-nums text-cyan-100">
+                  {fmtRes(resourceFootprint.before.water)}
+                  <span className="mx-1 text-slate-500">→</span>
+                  {fmtRes(resourceFootprint.after.water)}
+                </span>
+              </li>
+              <li className="flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-white/10 pt-2">
+                <span className="text-base" aria-hidden>
+                  🌿
+                </span>
+                <span className="text-slate-400">Token reduction</span>
+                <span className="font-semibold tabular-nums text-emerald-300">
+                  {resourceFootprint.savings.reductionPercent}%
+                </span>
+                <span className="text-xs text-slate-500">
+                  (Δ energy {fmtRes(resourceFootprint.savings.energySaved)} kWh · Δ water{" "}
+                  {fmtRes(resourceFootprint.savings.waterSaved)} L)
+                </span>
+              </li>
+            </ul>
+          </div>
+        )}
+
+        {tokenStats && (
+          <div className="rounded-xl border border-white/10 bg-black/25 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              All models (before → after)
+            </h3>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {TOKEN_MODELS.map((m) => {
+                const row = tokenStats.byModel[m];
+                const active = m === targetModel;
+                return (
+                  <div
+                    key={m}
+                    className={`rounded-lg border px-3 py-2 text-center transition ${
+                      active
+                        ? "border-cyan-400/50 bg-cyan-500/10"
+                        : "border-white/10 bg-white/5"
+                    }`}
+                  >
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                      {m}
+                    </p>
+                    <p className="mt-1 text-sm font-semibold tabular-nums text-white">
+                      {row.before}
+                      <span className="mx-0.5 text-slate-500">→</span>
+                      {row.after}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-cyan-300/90">
+                      {row.delta.efficiencyScore}% reduction
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="rounded-xl border border-cyan-400/20 bg-cyan-950/30 px-4 py-4">
           <h3 className="text-sm font-semibold text-cyan-200">🧬 Human Delta</h3>
           <p className="mt-2 text-sm leading-relaxed text-slate-300">
-            Language efficiency maps to lighter AI workloads—and a calmer ocean
-            in the view below.
+            Net improvement in{" "}
+            <span className="font-medium text-cyan-100">efficiency</span> (fewer
+            tokens) and{" "}
+            <span className="font-medium text-cyan-100">clarity</span> (less
+            ambiguity, safer structure) without losing meaning—mapped below to
+            compute-flow stability in the scene.
             {tokenDelta != null &&
             tokensBefore != null &&
-            efficiencyScore != null &&
-            impactLevel ? (
+            reductionPct != null &&
+            clarityScore != null ? (
               <>
                 {" "}
                 ~<span className="font-medium text-cyan-100">{tokenDelta}</span>{" "}
-                fewer estimated tokens (
-                <span className="tabular-nums">{efficiencyScore}%</span>{" "}
-                reduction). Impact:{" "}
-                <span className="font-medium text-cyan-100">{impactLevel}</span>{" "}
-                on compute.
+                fewer tokens ({targetModel}),{" "}
+                <span className="tabular-nums">{reductionPct}%</span> efficiency,{" "}
+                clarity <span className="tabular-nums">{clarityScore}</span>{" "}
+                (mode <span className="font-medium text-cyan-100">{modeUsed}</span>
+                ).
               </>
             ) : (
-              <> Optimize to see savings and impact band.</>
+              <> Run optimize to see Human Delta.</>
             )}
           </p>
         </div>
 
         <div>
-          <h3 className="text-sm font-semibold text-white">What Changed</h3>
+          <h3 className="text-sm font-semibold text-white">What changed</h3>
           <ul className="mt-3 space-y-2 text-sm text-slate-300">
             {[
-              "Removed filler words",
-              "Reduced redundancy",
-              "Improved clarity",
-              "Compressed structure",
+              "Filler & ambiguity passes (mode-dependent)",
+              "Constraint / task-verb safety check",
+              "Structure where appropriate (esp. structured mode)",
+              "Token + clarity scoring for Human Delta",
             ].map((line) => (
               <li key={line} className="flex gap-2">
                 <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />

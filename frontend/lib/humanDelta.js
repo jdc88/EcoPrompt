@@ -2,7 +2,7 @@
  * Human Delta: relate token reduction to a simple “AI compute savings” score.
  */
 
-import { estimateTokens } from "./optimizer";
+import { estimateTokensByModel } from "./tokenEstimate";
 
 /**
  * Percentage token reduction (0–100).
@@ -44,10 +44,11 @@ export function computeHumanDelta(beforeTokens, afterTokens) {
 }
 
 /**
- * Convenience: raw prompt strings → full delta object.
+ * Convenience: raw + optimized strings → delta for a given tokenizer profile.
+ * @param {string} model e.g. "GPT-4" | "Claude" | "LLaMA"
  */
-export function humanDeltaFromPrompts(raw, optimized) {
-  const beforeTokens = estimateTokens(raw);
-  const afterTokens = estimateTokens(optimized);
+export function humanDeltaFromPrompts(raw, optimized, model = "GPT-4") {
+  const beforeTokens = estimateTokensByModel(raw, model);
+  const afterTokens = estimateTokensByModel(optimized, model);
   return computeHumanDelta(beforeTokens, afterTokens);
 }

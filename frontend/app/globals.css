@@ -15,3 +15,15 @@ body {
     ),
     #040d1b;
 }
+
+/* Resource flow lines over ArcGIS (EcoPrompt OceanMap) */
+@keyframes flow {
+  from {
+    transform: translateX(-20%);
+    opacity: 0.3;
+  }
+  to {
+    transform: translateX(120%);
+    opacity: 1;
+  }
+}

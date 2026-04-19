@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import EcoPromptUI from "@/components/EcoPromptUI";
 
 const OceanMap = dynamic(() => import("@/components/OceanMap"), {
@@ -14,23 +14,28 @@ const OceanMap = dynamic(() => import("@/components/OceanMap"), {
 });
 
 export default function Home() {
-  const [efficiencyScore, setEfficiencyScore] = useState(null);
+  const [signal, setSignal] = useState(null);
+
+  const onSignalMetrics = useCallback((m) => {
+    setSignal(m);
+  }, []);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-4 py-10 md:px-8">
       <header className="text-center md:text-left">
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-cyan-300/80">
-          Same intent · fewer tokens · lower AI cost · spatial feedback
+          Same intent · clearer signal · efficiency + clarity · compute-flow view
         </p>
       </header>
 
-      <EcoPromptUI
-        onHumanDeltaChange={(delta) =>
-          setEfficiencyScore(delta?.efficiencyScore ?? null)
-        }
-      />
+      <EcoPromptUI onSignalMetrics={onSignalMetrics} />
 
-      <OceanMap efficiencyScore={efficiencyScore} />
+      <OceanMap
+        tokens={signal?.afterTokens ?? 50}
+        beforeTokens={signal?.beforeTokens ?? null}
+        efficiency={signal?.efficiency ?? 0}
+        clarityScore={signal?.clarityScore ?? 50}
+      />
     </main>
   );
 }
