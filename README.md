@@ -44,7 +44,7 @@ npm run dev
 ```
 
 ### Run Order
-In 3 Separate terminals, start services in this order:
+In 3 separate terminals, start services in this order:
 
 ```bash
 ollama serve # EcoPrompt
