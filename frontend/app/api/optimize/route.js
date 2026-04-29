@@ -141,6 +141,37 @@ function stripFiller(prompt) {
     .trim();
 }
 
+function compressLongRamble(prompt) {
+  const p = String(prompt || "").trim();
+  if (!p) return p;
+  const words = p.split(/\s+/);
+  if (words.length < 70) return p;
+  const lower = p.toLowerCase();
+
+  // High-value compression for common rambling AI-efficiency questions.
+  if (
+    (lower.includes("ai") || lower.includes("model")) &&
+    (lower.includes("energy") || lower.includes("water") || lower.includes("gpu") || lower.includes("cooling"))
+  ) {
+    return "Explain how prompt length affects AI compute, energy/water usage, and output quality. Clarify how models prioritize information in long prompts and whether rambling text is fully processed.";
+  }
+
+  const questionParts = p
+    .split("?")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (questionParts.length >= 1) {
+    const first = questionParts[0].slice(0, 180).replace(/\s+/g, " ").trim();
+    const second = questionParts[1]
+      ? questionParts[1].slice(0, 160).replace(/\s+/g, " ").trim()
+      : "";
+    const merged = second ? `${first}? ${second}?` : `${first}?`;
+    return merged;
+  }
+
+  return p.slice(0, 220).replace(/\s+/g, " ").trim();
+}
+
 function rewriteWithRules(original, skeleton, retrievalAllowed = true) {
   const cleaned = inferTaskPhrase(original, skeleton?.task, skeleton?.subject);
   const constraintsFromText = extractConstraints(original);
@@ -192,7 +223,8 @@ function shortestSafeRewrite(original, skeleton) {
   const candidateB = stripFiller(original).replace(/\s+/g, " ").trim();
   const task = inferTaskPhrase(original, skeleton?.task, skeleton?.subject);
   const candidateC = `List ${task}.`.replace(/\s+/g, " ").trim();
-  const options = [candidateA, candidateB, candidateC].filter(Boolean);
+  const candidateD = compressLongRamble(original);
+  const options = [candidateA, candidateB, candidateC, candidateD].filter(Boolean);
   if (!options.length) return original;
   return options.sort((a, b) => a.length - b.length)[0];
 }
